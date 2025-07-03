@@ -6,8 +6,8 @@
 //! - Network error handling with exponential backoff
 
 use crate::consts::prover::{
-    BACKOFF_DURATION, BATCH_SIZE, LOW_WATER_MARK, MAX_404S_BEFORE_GIVING_UP, QUEUE_LOG_INTERVAL,
-    TASK_QUEUE_SIZE,
+    BACKOFF_DURATION, BATCH_SIZE, ERROR_BACKOFF_DURATION, LOW_WATER_MARK, MAX_404S_BEFORE_GIVING_UP, 
+    QUEUE_LOG_INTERVAL, TASK_QUEUE_SIZE,
 };
 use crate::error_classifier::{ErrorClassifier, LogLevel};
 use crate::events::Event;
@@ -65,16 +65,15 @@ impl TaskFetchState {
     }
 
     pub fn increase_backoff_for_rate_limit(&mut self) {
-        self.backoff_duration = std::cmp::min(
-            self.backoff_duration * 2,
-            Duration::from_millis(BACKOFF_DURATION * 2),
-        );
+        // 对于速率限制错误，使用固定的 BACKOFF_DURATION
+        self.backoff_duration = Duration::from_millis(BACKOFF_DURATION);
     }
 
     pub fn increase_backoff_for_error(&mut self) {
+        // 对于其他错误，使用 ERROR_BACKOFF_DURATION 并允许指数增长
         self.backoff_duration = std::cmp::min(
             self.backoff_duration * 2,
-            Duration::from_millis(BACKOFF_DURATION * 2),
+            Duration::from_millis(ERROR_BACKOFF_DURATION * 4), // 最大允许增长到4倍
         );
     }
 }
@@ -383,7 +382,7 @@ async fn handle_fetch_error(
         let _ = event_sender
             .send(Event::task_fetcher_with_level(
                 format!(
-                    "⏳ Rate limited - retrying in {}s",
+                    "⏳ Rate limited - retrying in {}s (fixed backoff)",
                     state.backoff_duration.as_secs()
                 ),
                 crate::events::EventType::Error,
@@ -395,7 +394,7 @@ async fn handle_fetch_error(
         let log_level = state.error_classifier.classify_fetch_error(&error);
         let event = Event::task_fetcher_with_level(
             format!(
-                "Failed to fetch tasks: {}, retrying in {} seconds",
+                "Failed to fetch tasks: {}, retrying in {} seconds (variable backoff)",
                 error,
                 state.backoff_duration.as_secs()
             ),
