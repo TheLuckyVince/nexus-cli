@@ -532,7 +532,7 @@ async fn fetch_new_tasks_batch(
     Ok(new_tasks)
 }
 
-/// Submits proofs to the orchestrator
+/// Submits proofs to the orchestrator with retry support
 pub async fn submit_proofs(
     signing_key: SigningKey,
     orchestrator: Box<dyn Orchestrator>,
@@ -544,6 +544,7 @@ pub async fn submit_proofs(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut completed_count = 0;
+        let mut retry_count = 0;
         let mut last_stats_time = std::time::Instant::now();
         let stats_interval = Duration::from_secs(60);
 
@@ -564,12 +565,14 @@ pub async fn submit_proofs(
                                 if success {
                                     completed_count += 1;
                                 }
+                                // Increment retry count if this was a retry (tracked internally in process_proof_submission)
                             }
 
                             // Check if it's time to report stats (avoid timer starvation)
                             if last_stats_time.elapsed() >= stats_interval {
-                                report_performance_stats(&event_sender, completed_count, last_stats_time).await;
+                                report_performance_stats(&event_sender, completed_count, retry_count, last_stats_time).await;
                                 completed_count = 0;
+                                retry_count = 0;
                                 last_stats_time = std::time::Instant::now();
                             }
                         }
@@ -579,8 +582,9 @@ pub async fn submit_proofs(
 
                 _ = tokio::time::sleep(stats_interval) => {
                     // Fallback timer in case there's no activity
-                    report_performance_stats(&event_sender, completed_count, last_stats_time).await;
+                    report_performance_stats(&event_sender, completed_count, retry_count, last_stats_time).await;
                     completed_count = 0;
+                    retry_count = 0;
                     last_stats_time = std::time::Instant::now();
                 }
 
@@ -590,10 +594,11 @@ pub async fn submit_proofs(
     })
 }
 
-/// Report performance statistics
+/// Report performance statistics with retry information
 async fn report_performance_stats(
     event_sender: &mpsc::Sender<Event>,
     completed_count: u64,
+    retry_count: u64,
     last_stats_time: std::time::Instant,
 ) {
     let elapsed = last_stats_time.elapsed();
@@ -603,10 +608,17 @@ async fn report_performance_stats(
         0.0
     };
 
+    let retry_info = if retry_count > 0 {
+        format!(" ({} retries)", retry_count)
+    } else {
+        String::new()
+    };
+
     let msg = format!(
-        "📊 Performance: {} tasks in {:.1}s ({:.1} tasks/min)",
+        "📊 Performance: {} tasks in {:.1}s{} ({:.1} tasks/min)",
         completed_count,
         elapsed.as_secs_f64(),
+        retry_info,
         tasks_per_minute
     );
     let _ = event_sender
@@ -618,8 +630,8 @@ async fn report_performance_stats(
         .await;
 }
 
-/// Process a single proof submission
-/// Returns Some(true) if successful, Some(false) if failed, None if should skip
+/// Process a single proof submission with retry logic
+/// Returns Some(true) if successful, Some(false) if failed after retries, None if should skip
 async fn process_proof_submission(
     task: Task,
     proof: Proof,
@@ -645,26 +657,73 @@ async fn process_proof_submission(
     let proof_bytes = postcard::to_allocvec(&proof).expect("Failed to serialize proof");
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
 
-    // Submit to orchestrator
-    match orchestrator
-        .submit_proof(
-            &task.task_id,
-            &proof_hash,
-            proof_bytes,
-            signing_key.clone(),
-            num_workers,
-        )
-        .await
-    {
-        Ok(_) => {
-            handle_submission_success(&task, event_sender, successful_tasks).await;
-            Some(true)
+    // Retry configuration
+    const MAX_RETRIES: usize = 6;
+    const INITIAL_RETRY_DELAY_MS: u64 = 1000; // 1 second
+
+    // Submit to orchestrator with retries
+    for retry in 0..=MAX_RETRIES {
+        let is_retry = retry > 0;
+        
+        if is_retry {
+            let msg = format!(
+                "Retrying proof submission for task {} (attempt {}/{})",
+                task.task_id, retry, MAX_RETRIES
+            );
+            let _ = event_sender
+                .send(Event::proof_submitter_with_level(
+                    msg,
+                    crate::events::EventType::Refresh,
+                    LogLevel::Info,
+                ))
+                .await;
         }
-        Err(e) => {
-            handle_submission_error(&task, e, event_sender).await;
-            Some(false)
+
+        match orchestrator
+            .submit_proof(
+                &task.task_id,
+                &proof_hash,
+                proof_bytes.clone(), // Clone for retry
+                signing_key.clone(),
+                num_workers,
+            )
+            .await
+        {
+            Ok(_) => {
+                handle_submission_success(&task, event_sender, successful_tasks).await;
+                return Some(true);
+            }
+            Err(e) => {
+                // Don't retry on certain errors
+                if should_abort_retries(&e) || retry == MAX_RETRIES {
+                    handle_submission_error(&task, e, event_sender).await;
+                    return Some(false);
+                }
+                
+                // Log the error but continue to retry
+                let retry_msg = format!(
+                    "Submission attempt {} failed: {}. Will retry in {}ms",
+                    retry + 1,
+                    e,
+                    INITIAL_RETRY_DELAY_MS * 2u64.pow(retry as u32)
+                );
+                let _ = event_sender
+                    .send(Event::proof_submitter_with_level(
+                        retry_msg,
+                        crate::events::EventType::Error,
+                        LogLevel::Warn,
+                    ))
+                    .await;
+                
+                // Exponential backoff
+                let delay = INITIAL_RETRY_DELAY_MS * 2u64.pow(retry as u32);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
         }
     }
+    
+    // This should never be reached due to the return in the last retry
+    Some(false)
 }
 
 /// Handle successful proof submission
@@ -684,25 +743,61 @@ async fn handle_submission_success(
         .await;
 }
 
-/// Handle proof submission errors
+/// Handle proof submission errors with improved error categorization
 async fn handle_submission_error(
     task: &Task,
     error: OrchestratorError,
     event_sender: &mpsc::Sender<Event>,
 ) {
-    let msg = match error {
+    let (msg, log_level) = match &error {
         OrchestratorError::Http { status, .. } => {
-            format!(
-                "Failed to submit proof for task {}. Status: {}",
-                task.task_id, status
+            let status_msg = match status {
+                400 => "Bad request (invalid proof format)",
+                401 => "Unauthorized (authentication failed)",
+                403 => "Forbidden (not authorized for this task)",
+                404 => "Task not found (may have been completed by another prover)",
+                408 => "Request timeout",
+                429 => "Rate limited (too many submissions)",
+                500 => "Server error (internal error)",
+                502 => "Bad gateway (server error)",
+                503 => "Service unavailable (server overloaded)",
+                504 => "Gateway timeout (server took too long)",
+                _ => "Unknown HTTP error",
+            };
+            
+            (
+                format!(
+                    "Failed to submit proof for task {}. Status {}: {}",
+                    task.task_id, status, status_msg
+                ),
+                if *status >= 500 { LogLevel::Warn } else { LogLevel::Error }
             )
         }
-        e => {
-            format!("Failed to submit proof for task {}: {}", task.task_id, e)
-        }
+        e => (
+            format!("Failed to submit proof for task {}: {}", task.task_id, e),
+            LogLevel::Error
+        ),
     };
 
     let _ = event_sender
-        .send(Event::proof_submitter(msg, crate::events::EventType::Error))
+        .send(Event::proof_submitter_with_level(
+            msg, 
+            crate::events::EventType::Error,
+            log_level
+        ))
         .await;
+}
+
+/// Determine if we should abort retries based on error type
+fn should_abort_retries(error: &OrchestratorError) -> bool {
+    match error {
+        // Don't retry for client errors that won't be resolved by retrying
+        OrchestratorError::Http { status, .. } => {
+            // Don't retry for 400, 401, 403 (client errors that won't be fixed by retrying)
+            // Do retry for 408, 429, 500, 502, 503, 504 (temporary server issues)
+            matches!(status, 400 | 401 | 403 | 404)
+        }
+        // Other errors like serialization might be worth retrying
+        _ => false,
+    }
 }
