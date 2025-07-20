@@ -13,7 +13,7 @@ use crate::system::{estimate_peak_gflops, get_memory_info};
 use crate::task::Task;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use prost::Message;
-use reqwest::{Client, ClientBuilder, Response, Proxy};
+use reqwest::{Client, Response};
 use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -31,6 +31,7 @@ pub struct OrchestratorClient {
 }
 
 impl OrchestratorClient {
+    #[allow(dead_code)]
     pub fn new(environment: Environment) -> Self {
         Self::new_with_proxy(environment, None)
     }
