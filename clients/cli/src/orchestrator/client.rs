@@ -14,7 +14,6 @@ use crate::task::Task;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use prost::Message;
 use reqwest::{Client, Response};
-use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -41,12 +40,23 @@ impl OrchestratorClient {
         
         // 从文件读取代理配置
         if let Some(proxy_path) = proxy_file_path {
-            if let Ok(proxy_url) = std::fs::read_to_string(proxy_path) {
-                let proxy_url = proxy_url.trim();
-                if !proxy_url.is_empty() {
-                    if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
-                        client_builder = client_builder.proxy(proxy);
+            match std::fs::read_to_string(proxy_path) {
+                Ok(proxy_url) => {
+                    let proxy_url = proxy_url.trim();
+                    if !proxy_url.is_empty() {
+                        match reqwest::Proxy::all(proxy_url) {
+                            Ok(proxy) => {
+                                client_builder = client_builder.proxy(proxy);
+                                println!("Using proxy: {}", proxy_url);
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Invalid proxy URL '{}': {}", proxy_url, e);
+                            }
+                        }
                     }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not read proxy file '{}': {}", proxy_path, e);
                 }
             }
         }
