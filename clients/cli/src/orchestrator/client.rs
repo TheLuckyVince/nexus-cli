@@ -13,7 +13,8 @@ use crate::system::{estimate_peak_gflops, get_memory_info};
 use crate::task::Task;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use prost::Message;
-use reqwest::{Client, ClientBuilder, Response};
+use reqwest::{Client, ClientBuilder, Response, Proxy};
+use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -31,14 +32,27 @@ pub struct OrchestratorClient {
 
 impl OrchestratorClient {
     pub fn new(environment: Environment) -> Self {
-        Self {
-            client: ClientBuilder::new()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to create HTTP client"),
-            environment,
+        Self::new_with_proxy(environment, None)
+    }
+    
+    pub fn new_with_proxy(environment: Environment, proxy_file_path: Option<&str>) -> Self {
+        let mut client_builder = reqwest::Client::builder();
+        
+        // 从文件读取代理配置
+        if let Some(proxy_path) = proxy_file_path {
+            if let Ok(proxy_url) = std::fs::read_to_string(proxy_path) {
+                let proxy_url = proxy_url.trim();
+                if !proxy_url.is_empty() {
+                    if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
+                        client_builder = client_builder.proxy(proxy);
+                    }
+                }
+            }
         }
+        
+        let client = client_builder.build().unwrap_or_else(|_| reqwest::Client::new());
+        
+        Self { client, environment }
     }
 
     fn build_url(&self, endpoint: &str) -> String {

@@ -129,11 +129,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::RegisterUser { wallet_address } => {
             println!("Registering user with wallet address: {}", wallet_address);
-            let orchestrator = Box::new(OrchestratorClient::new(environment));
+            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(environment, Some("proxy.txt")));
             register_user(&wallet_address, &config_path, orchestrator).await
         }
         Command::RegisterNode { node_id } => {
-            let orchestrator = Box::new(OrchestratorClient::new(environment));
+            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(environment, Some("proxy.txt")));
             register_node(node_id, &config_path, orchestrator).await
         }
     }
@@ -174,7 +174,7 @@ async fn start(
     // Create a signing key for the prover.
     let mut csprng = rand_core::OsRng;
     let signing_key: SigningKey = SigningKey::generate(&mut csprng);
-    let orchestrator_client = OrchestratorClient::new(env.clone());
+    let orchestrator_client = OrchestratorClient::new_with_proxy(env.clone(), Some("proxy.txt"));
     // Clamp the number of workers to [1,8]. Keep this low for now to avoid rate limiting.
     let num_workers: usize = max_threads.unwrap_or(1).clamp(1, 8) as usize;
     let (shutdown_sender, _) = broadcast::channel(1); // Only one shutdown signal needed
