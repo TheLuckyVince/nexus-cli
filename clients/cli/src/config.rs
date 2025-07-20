@@ -6,7 +6,13 @@ use std::path::PathBuf;
 use std::{fs, path::Path};
 
 /// Get the path to the Nexus config file, typically located at ~/.nexus/config.json.
+/// Can be overridden with NEXUS_CONFIG_DIR environment variable.
 pub fn get_config_path() -> Result<PathBuf, std::io::Error> {
+    if let Ok(config_dir) = std::env::var("NEXUS_CONFIG_DIR") {
+        let config_path = PathBuf::from(config_dir).join("config.json");
+        return Ok(config_path);
+    }
+    
     let home_path = home::home_dir().ok_or(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "Home directory not found",
