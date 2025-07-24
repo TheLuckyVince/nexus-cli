@@ -129,11 +129,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::RegisterUser { wallet_address } => {
             println!("Registering user with wallet address: {}", wallet_address);
-            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(environment, Some("proxy.txt")));
+            let proxy_file = std::env::var("NEXUS_PROXY_FILE").ok();
+            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(
+                environment, 
+                proxy_file.as_deref()
+            ));
             register_user(&wallet_address, &config_path, orchestrator).await
         }
         Command::RegisterNode { node_id } => {
-            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(environment, Some("proxy.txt")));
+            let proxy_file = std::env::var("NEXUS_PROXY_FILE").ok();
+            let orchestrator = Box::new(OrchestratorClient::new_with_proxy(
+                environment, 
+                proxy_file.as_deref()
+            ));
             register_node(node_id, &config_path, orchestrator).await
         }
     }

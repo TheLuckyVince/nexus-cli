@@ -38,26 +38,29 @@ impl OrchestratorClient {
     pub fn new_with_proxy(environment: Environment, proxy_file_path: Option<&str>) -> Self {
         let mut client_builder = reqwest::Client::builder();
         
+        // 优先使用传入的路径，然后检查环境变量，最后使用默认值
+        let proxy_path = proxy_file_path
+            .or_else(|| std::env::var("NEXUS_PROXY_FILE").ok().as_deref())
+            .unwrap_or("proxy.txt");
+        
         // 从文件读取代理配置
-        if let Some(proxy_path) = proxy_file_path {
-            match std::fs::read_to_string(proxy_path) {
-                Ok(proxy_url) => {
-                    let proxy_url = proxy_url.trim();
-                    if !proxy_url.is_empty() {
-                        match reqwest::Proxy::all(proxy_url) {
-                            Ok(proxy) => {
-                                client_builder = client_builder.proxy(proxy);
-                                println!("Using proxy: {}", proxy_url);
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Invalid proxy URL '{}': {}", proxy_url, e);
-                            }
+        match std::fs::read_to_string(proxy_path) {
+            Ok(proxy_url) => {
+                let proxy_url = proxy_url.trim();
+                if !proxy_url.is_empty() {
+                    match reqwest::Proxy::all(proxy_url) {
+                        Ok(proxy) => {
+                            client_builder = client_builder.proxy(proxy);
+                            println!("Using proxy: {}", proxy_url);
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Invalid proxy URL '{}': {}", proxy_url, e);
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!("Warning: Could not read proxy file '{}': {}", proxy_path, e);
-                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not read proxy file '{}': {}", proxy_path, e);
             }
         }
         
