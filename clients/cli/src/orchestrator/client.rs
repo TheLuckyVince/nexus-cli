@@ -38,9 +38,12 @@ impl OrchestratorClient {
     pub fn new_with_proxy(environment: Environment, proxy_file_path: Option<&str>) -> Self {
         let mut client_builder = reqwest::Client::builder();
         
+        // 获取环境变量值并存储
+        let env_proxy_file = std::env::var("NEXUS_PROXY_FILE").ok();
+        
         // 优先使用传入的路径，然后检查环境变量，最后使用默认值
         let proxy_path = proxy_file_path
-            .or_else(|| std::env::var("NEXUS_PROXY_FILE").ok().as_deref())
+            .or_else(|| env_proxy_file.as_deref())
             .unwrap_or("proxy.txt");
         
         // 从文件读取代理配置
